@@ -1,0 +1,36 @@
+# --- Dependencias / entornos ---
+node_modules/
+env/
+backend/venv/
+
+# --- Sensibles / locales ---
+*.env
+
+# secrets (mantener ejemplos, no credenciales reales)
+backend/secrets/*
+!backend/secrets/credentials.sample.json
+
+# uploads (mantener carpeta vacía para que exista en el repo)
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# --- Builds / temporales ---
+dist/
+build/
+*.log
+*.tmp
+*.temp
+
+# --- Python cache ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# --- DB locales ---
+*.db
+*.sqlite3
+
+# --- SO ---
+.DS_Store
+Thumbs.db
