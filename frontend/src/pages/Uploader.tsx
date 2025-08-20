@@ -2,10 +2,6 @@ import { useEffect, useRef, useState } from 'react'
 
 export default function Uploader() {
   // Backend constraints
-  const BACKEND_MAX_MB = 10
-  const ALLOWED_MIME = ['image/jpeg', 'image/png', 'image/webp'] as const
-  const MAX_DIMENSION = 1920 // px
-
   const MAX_PREVIEW = 1920// px
 
   const params = new URLSearchParams(location.search)
@@ -28,7 +24,6 @@ export default function Uploader() {
   }
   const deviceId = getDeviceId()
 
-  const [originalFile, setOriginalFile] = useState<File | null>(null)
   const [fileToUpload, setFileToUpload] = useState<File | null>(null)
 
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
@@ -52,7 +47,6 @@ export default function Uploader() {
   const openGallery = () => galleryInputRef.current?.click()
 
   const resetSelection = () => {
-    setOriginalFile(null)
     setFileToUpload(null)
     if (currentPreviewRef.current) {
       URL.revokeObjectURL(currentPreviewRef.current)
@@ -68,44 +62,6 @@ export default function Uploader() {
   }
 
   // ---------- Conversión / optimización ----------
-  async function fileToImageBitmap(file: File): Promise<ImageBitmap> {
-    // 1) Intento con resize nativo (bajo consumo de RAM)
-  try {
-    // Nota: usamos el lado mayor = MAX_DIMENSION y dejamos que el navegador mantenga aspecto
-    return await (createImageBitmap as any)(file, {
-      resizeWidth: MAX_DIMENSION,
-      resizeHeight: MAX_DIMENSION,
-      resizeQuality: 'high'
-    })
-  } catch {
-    // 2) Fallback: decodificar con <img> y escalar nosotros en canvas pequeño
-    const url = URL.createObjectURL(file)
-    try {
-      const img = document.createElement('img')
-      img.decoding = 'async'
-      img.src = url
-      await img.decode()
-
-      const maxSide = Math.max(img.naturalWidth, img.naturalHeight)
-      const scale = Math.min(1, MAX_DIMENSION / maxSide)
-      const outW = Math.max(1, Math.round(img.naturalWidth * scale))
-      const outH = Math.max(1, Math.round(img.naturalHeight * scale))
-
-      const canvas = document.createElement('canvas')
-      canvas.width = outW
-      canvas.height = outH
-      const ctx = canvas.getContext('2d', { alpha: false })
-      if (!ctx) throw new Error('No se pudo crear el contexto de canvas')
-      ctx.drawImage(img, 0, 0, outW, outH)
-
-      // Creamos un bitmap desde el canvas ya reducido (muy ligero)
-      const bmp = await createImageBitmap(canvas)
-      return bmp
-    } finally {
-      URL.revokeObjectURL(url)
-    }
-  }
-  }
 
   async function buildPreviewUrl(
     file: File,
@@ -188,78 +144,6 @@ export default function Uploader() {
     onReady?.();
   }
   
-  async function drawToCanvasAndExport(
-    bmp: ImageBitmap,
-    opts: { maxDim: number; mime: 'image/webp' | 'image/jpeg'; quality: number }
-  ): Promise<Blob> {
-    const { width, height } = bmp
-    const scale = Math.min(1, opts.maxDim / Math.max(width, height))
-    const outW = Math.max(1, Math.round(width * scale))
-    const outH = Math.max(1, Math.round(height * scale))
-
-    const canvas = document.createElement('canvas')
-    canvas.width = outW
-    canvas.height = outH
-    const ctx = canvas.getContext('2d', { alpha: false })
-    if (!ctx) throw new Error('No se pudo crear el contexto de canvas')
-    ctx.drawImage(bmp, 0, 0, outW, outH)
-
-    return await new Promise<Blob>((resolve, reject) => {
-      canvas.toBlob(
-        (blob) => (blob ? resolve(blob) : reject(new Error('No se pudo exportar la imagen'))),
-        opts.mime,
-        opts.quality
-      )
-    })
-  }
-
-  async function maybeConvertToAllowed(file: File): Promise<File> {
-    // Rechazar otros formatos (ej: HEIC/HEIF)
-    if (!ALLOWED_MIME.includes(file.type as any)) {
-      throw new Error('Formato no permitido. Solo JPG, PNG o WebP.')
-    }
-
-    // Si ya cumple tamaño, subir tal cual
-    if (file.size <= BACKEND_MAX_MB * 1024 * 1024) {
-      return file
-    }
-
-    // Si excede tamaño, reescalar/comprimir manteniendo formatos permitidos
-    // Preferimos WEBP/JPEG para bajar tamaño (PNG rara vez comprime)
-    let bmp: ImageBitmap
-    try {
-      bmp = await fileToImageBitmap(file) // <- ya decodifica reducido
-    } catch {
-      throw new Error('No se pudo preparar la imagen (memoria). Intentá con otra foto.')
-    }
-
-    // Exportamos intentando WebP y, si no baja suficiente, pasamos a JPEG
-    let quality = 0.9
-    let mime: 'image/webp' | 'image/jpeg' = 'image/webp'
-    let maxDim = MAX_DIMENSION
-
-    for (let i = 0; i < 6; i++) {
-      const blob = await drawToCanvasAndExport(bmp, { maxDim, mime, quality })
-      if (blob.size <= BACKEND_MAX_MB * 1024 * 1024) {
-        const newName = (file.name.replace(/\.[^.]+$/, '') || 'photo') + (mime === 'image/webp' ? '.webp' : '.jpg')
-        return new File([blob], newName, { type: mime, lastModified: Date.now() })
-      }
-      quality = Math.max(0.5, quality - 0.1)
-      maxDim = Math.max(800, Math.round(maxDim * 0.85))
-      if (i === 2 && mime === 'image/webp') mime = 'image/jpeg'
-    }
-
-    throw new Error('No se pudo comprimir por debajo de 10MB. Probá con una imagen más chica.')
-  }
-
-  function makePreviewURL(file: File) {
-    setPreviewLoading(true)
-    const newUrl = URL.createObjectURL(file)
-    const oldUrl = currentPreviewRef.current
-    currentPreviewRef.current = newUrl
-    setPreviewUrl(newUrl)
-    ;(handleRevokeOldUrl as any).pending = oldUrl
-  }
 
   async function handlePick(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
@@ -269,7 +153,6 @@ export default function Uploader() {
     setDone(false);
   
     // 1) Guardar ORIGINAL para subir (sin tocarlo)
-    setOriginalFile(f);
     setFileToUpload(f);
   
     // 2) Construir SOLO la preview reducida (no afecta al archivo de subida)
