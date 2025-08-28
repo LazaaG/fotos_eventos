@@ -35,12 +35,11 @@ def upload_to_drive(file_bytes: bytes, filename: str, mime: str, folder_id: str,
 def ensure_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
 
-def upload_to_local(file_bytes: bytes, filename: str, upload_dir: Path, base_public_url: str) -> Tuple[str, str]:
+def upload_to_local(file_bytes: bytes, filename: str, upload_dir: Path, base_public_url: str, keep_name: bool = False) -> Tuple[str, str]:
     ensure_dir(upload_dir)
     file_id = uuid.uuid4().hex
-    out_name = f"{file_id}_{filename}"
+    out_name = filename if keep_name else f"{file_id}_{filename}"
     out_path = upload_dir / out_name
     out_path.write_bytes(file_bytes)
-    # URL pública servida por FastAPI StaticFiles
     public_url = f"{base_public_url}/{out_name}"
     return file_id, public_url

@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .db import init_db, connect
-from .models import ScreenStateResponse
+from .models import ScreenStateResponse, DefaultItem, DefaultsResponse
 from .storage import upload_to_local  # <--- usamos siempre local para servir en screen
 from .rate_limit import RateLimiter
 
@@ -35,10 +35,19 @@ ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://local
 
 # Mantengo STORAGE para montar estáticos, pero la subida SIEMPRE va a local para screen
 STORAGE = os.getenv("STORAGE", "local").lower()  # 'local' or 'drive'
-DEFAULT_IMAGE_URL = os.getenv("DEFAULT_IMAGE_URL", "")
+DEFAULT_IMAGE_URL = (os.getenv("DEFAULT_IMAGE_URL") or "").strip()
 IMAGE_DURATION_SECONDS = int(os.getenv("IMAGE_DURATION_SECONDS", "30"))
 MAX_IMAGE_MB = int(os.getenv("MAX_IMAGE_MB", "10"))
 ALLOWED_MIME = [m.strip() for m in os.getenv("ALLOWED_MIME", "image/jpeg,image/png,image/webp").split(",")]
+
+# Carrusel generado
+DEFAULTS_DIR = os.getenv("DEFAULTS_DIR", "/static/defaults").rstrip("/")
+DEFAULTS_PREFIX = os.getenv("DEFAULTS_PREFIX", "default_")
+DEFAULTS_EXT = os.getenv("DEFAULTS_EXT", ".jpg")
+DEFAULTS_PAD = int(os.getenv("DEFAULTS_PAD", "2"))
+DEFAULTS_START = int(os.getenv("DEFAULTS_START", "1"))
+DEFAULTS_END = int(os.getenv("DEFAULTS_END", "15"))
+DEFAULTS_MS = int(os.getenv("DEFAULTS_MS", "8000"))
 
 # Rate limit
 RATE_LIMIT_UPLOADS_PER_WINDOW = int(os.getenv("RATE_LIMIT_UPLOADS_PER_WINDOW", "1"))
@@ -129,11 +138,32 @@ async def lifespan(app: FastAPI):
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_drive_backup_logs_photo ON drive_backup_logs(photo_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_drive_backup_logs_created ON drive_backup_logs(created_at)")
+
+    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+    # AUTO‑MIGRACIÓN: asegurar columnas nuevas en photos
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(photos)").fetchall()}
+
+    def add_col(sql: str):
+        try:
+            conn.execute(sql)
+        except Exception:
+            # si ya existe o el engine no soporta el ALTER, seguimos
+            pass
+
+    if "uploader_name" not in cols:
+        add_col("ALTER TABLE photos ADD COLUMN uploader_name TEXT")
+    if "uploader_seq" not in cols:
+        add_col("ALTER TABLE photos ADD COLUMN uploader_seq INTEGER")
+    if "filename" not in cols:
+        add_col("ALTER TABLE photos ADD COLUMN filename TEXT")
+    # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
     conn.commit()
     conn.close()
 
     asyncio.create_task(ticker())
     yield
+
 
 
 # ---------- App ----------
@@ -261,61 +291,78 @@ async def _backup_to_drive_async(photo_id: str, content: bytes, filename: str, m
         log_drive_backup(photo_id, "failed", f"Drive upload failed: {e}", event_id=event_id, filename=filename)
 
 # ---------- Upload ----------
+from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Request, HTTPException, Header
+import re
+NAME_RE = re.compile(r'^[A-Za-z0-9_-]{1,32}$')
+
 @app.post("/api/photos")
 async def post_photo(
     request: Request,
     file: UploadFile = File(...),
     event: str = Form(...),
     device_id: Optional[str] = Form(None),
+    uploader_name_form: Optional[str] = Form(None),
     x_device_id: Optional[str] = Header(None),
+    x_uploader_name: Optional[str] = Header(None),
 ):
-    # Determinar device_id: header > form > IP
     device = (x_device_id or device_id or client_ip(request)).strip()
-
-    # --- Rate limit por dispositivo con fallback ---
     allowed, remain = rate_allow_with_fallback(event, device, RATE_WINDOW)
     if not allowed:
-        return JSONResponse(
-            status_code=429,
-            content={
-                "error": f"Rate limit: esperá {remain}s entre subidas",
-                "remaining": remain
-            }
-        )
-    now = int(time.time())
+        return JSONResponse(status_code=429, content={"error": f"Rate limit: esperá {remain}s entre subidas","remaining": remain})
 
-    # ---- resto de tu código sin cambios ----
+    # ---- validar tipo y tamaño ----
     if file.content_type not in ALLOWED_MIME:
         raise HTTPException(400, detail="Tipo no permitido")
     content = await file.read()
     if len(content) > MAX_IMAGE_MB * 1024 * 1024:
         raise HTTPException(400, detail="Archivo demasiado grande")
 
+    # ---- nombre de usuario ----
+    uploader = (x_uploader_name or uploader_name_form or "").strip()
+    if not NAME_RE.match(uploader):
+        raise HTTPException(400, detail="uploader_name inválido")
+
+    # ---- extensión y filename final (Usuario01.jpg) ----
     ext = mimetypes.guess_extension(file.content_type) or ".jpg"
-    safe_name = f"{uuid.uuid4().hex}{ext}"
 
-    _, public_url = upload_to_local(content, safe_name, LOCAL_UPLOAD_DIR, BASE_PUBLIC_URL)
-
-    now_iso = datetime.now(timezone.utc).isoformat()
+    # Calcular secuencia atomicamente por (event, uploader)
     conn = connect()
-    photo_id = uuid.uuid4().hex
-    conn.execute(
-        "INSERT INTO photos(id,event_id,gdrive_file_id,public_url,status,created_at) VALUES(?,?,?,?,?,?)",
-        (photo_id, event, None, public_url, "queued", now_iso)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT COALESCE(MAX(uploader_seq),0) AS mx FROM photos WHERE event_id=? AND uploader_name=?",
+            (event, uploader)
+        ).fetchone()
+        next_seq = int(row["mx"] or 0) + 1
+        base_name = f"{uploader}{next_seq:02d}{ext}"
 
+        # Guardar local con ese nombre exacto
+        _, public_url = upload_to_local(content, base_name, LOCAL_UPLOAD_DIR, BASE_PUBLIC_URL, keep_name=True)
+
+        # Insertar en DB
+        now_iso = datetime.now(timezone.utc).isoformat()
+        photo_id = uuid.uuid4().hex
+        conn.execute(
+            """INSERT INTO photos(id,event_id,gdrive_file_id,public_url,status,created_at,uploader_name,uploader_seq,filename)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (photo_id, event, None, public_url, "queued", now_iso, uploader, next_seq, base_name)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Backup a Drive con el MISMO filename
     asyncio.create_task(_backup_to_drive_async(
         photo_id=photo_id,
         content=content,
-        filename=safe_name,
+        filename=base_name,
         mime_type=file.content_type or "application/octet-stream",
         event_id=event
     ))
 
     await broadcast(event, {"type": "queue_update"})
-    return {"ok": True, "photo_id": photo_id, "url": public_url, "drive_backup": "scheduled"}
+    return {"ok": True, "photo_id": photo_id, "url": public_url, "filename": base_name, "uploader_seq": next_seq, "drive_backup": "scheduled"}
+
 
 
 # ---------- Estado de pantalla ----------
@@ -331,16 +378,52 @@ def screen_state(event: str):
     if not ph or not ph["current_photo_id"]:
         # default
         conn.close()
-        return {
-            "current": {"url": DEFAULT_IMAGE_URL, "duration": IMAGE_DURATION_SECONDS, "started_at": None},
-            "queue_size": queue_count
-        }
+        if DEFAULT_IMAGE_URL:
+            return {
+                "current": {
+                    "url": DEFAULT_IMAGE_URL,
+                    "duration": IMAGE_DURATION_SECONDS,
+                    "started_at": None,
+                    "is_default": True
+                },
+                "queue_size": queue_count,
+                "idle": False
+            }
+        # idle puro → null para activar carrusel en el front
+        return {"current": None, "queue_size": queue_count, "idle": True}
 
-    p = conn.execute("SELECT public_url FROM photos WHERE id=?", (ph["current_photo_id"],)).fetchone()
+    # con reproducción activa
+    p = conn.execute(
+        "SELECT public_url, uploader_name FROM photos WHERE id=?",
+        (ph["current_photo_id"],)
+    ).fetchone()
     conn.close()
+
+    if not p:
+        # playhead apunta a algo inexistente → tratamos como idle/default
+        if DEFAULT_IMAGE_URL:
+            return {
+                "current": {
+                    "url": DEFAULT_IMAGE_URL,
+                    "duration": IMAGE_DURATION_SECONDS,
+                    "started_at": None,
+                    "is_default": True
+                },
+                "queue_size": queue_count,
+                "idle": False
+            }
+        return {"current": None, "queue_size": queue_count, "idle": True}
+
     return {
-        "current": {"url": p["public_url"], "duration": ph["duration_seconds"], "started_at": ph["started_at"]},
-        "queue_size": queue_count
+        "current": {
+            "url": p["public_url"],
+            "duration": ph["duration_seconds"],
+            "started_at": ph["started_at"],
+            "username": p["uploader_name"],
+            "is_default": False
+        },
+        "queue_size": queue_count,
+        "idle": False
     }
 
 # ---------- WebSocket para pantallas ----------
@@ -485,3 +568,23 @@ def drive_folder_check():
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
 
 
+# -----------------------------------------------------------------------------------
+def build_defaults_manifest():
+    """
+    Genera la lista del carrusel en base al .env, sin leer disco.
+    Respeta el orden: DEFAULTS_START..DEFAULTS_END.
+    """
+    items = []
+    order = 0
+    for n in range(DEFAULTS_START, DEFAULTS_END + 1):
+        num = str(n).zfill(DEFAULTS_PAD)
+        url = f"{DEFAULTS_DIR}/{DEFAULTS_PREFIX}{num}{DEFAULTS_EXT}"
+        items.append(DefaultItem(url=url, order=order, duration_ms=DEFAULTS_MS))
+        order += 1
+    return items
+
+@app.get("/api/screen/defaults", response_model=DefaultsResponse)
+def api_screen_defaults(event: str = "default"):
+    # Si mañana querés tener defaults por evento, podés condicionar por `event`
+    items = build_defaults_manifest()
+    return {"items": items}

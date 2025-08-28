@@ -1,13 +1,29 @@
 import { useEffect, useRef, useState } from 'react'
+import confetti from 'canvas-confetti'
 
 export default function Uploader() {
-  // Backend constraints
-  const MAX_PREVIEW = 1920// px
-
+  const MAX_PREVIEW = 1920
   const params = new URLSearchParams(location.search)
   const event = params.get('event') || 'default'
 
-  // ---- device_id persistente (para rate-limit por dispositivo) ----
+  // ---------- nombre de usuario ----------
+  const NAME_KEY = 'uploader_name'
+  const [uploaderName, setUploaderName] = useState<string>(() => localStorage.getItem(NAME_KEY) || '')
+  const [editingName, setEditingName] = useState(!uploaderName)
+
+  const saveName = () => {
+    const v = uploaderName.trim()
+    const ok = /^[A-Za-z0-9 _-]{1,32}$/.test(v)   // permito espacio para nombres de invitados
+    if (!ok) {
+      alert('Nombre inválido. Usá letras/números/espacio/guión/guión_bajo (1 a 32).')
+      return
+    }
+    localStorage.setItem(NAME_KEY, v)
+    setUploaderName(v)
+    setEditingName(false)
+  }
+
+  // ---- device_id persistente (ya existente) ----
   function getDeviceId() {
     const KEY = 'uploader_device_id'
     let id = localStorage.getItem(KEY)
@@ -22,14 +38,51 @@ export default function Uploader() {
     }
     return id
   }
+
+  function fireWeddingConfetti() {
+    const colors = ['#ffffff', '#0b1a39']; // rosa, blanco, azul marino
+  
+    // ráfaga izquierda → derecha
+    confetti({
+      particleCount: 60,
+      angle: 60,
+      spread: 60,
+      origin: { x: 0, y: 0.6 },
+      colors,
+      scalar: 1.0
+    });
+  
+    // ráfaga derecha → izquierda (ligero delay para efecto)
+    setTimeout(() => {
+      confetti({
+        particleCount: 60,
+        angle: 120,
+        spread: 60,
+        origin: { x: 1, y: 0.6 },
+        colors,
+        scalar: 1.0
+      });
+    }, 120);
+  
+    // lluvia suave al centro
+    setTimeout(() => {
+      confetti({
+        particleCount: 80,
+        spread: 70,
+        origin: { x: 0.5, y: 0.3 },
+        colors,
+        scalar: 0.9,
+        ticks: 200
+      });
+    }, 180);
+  }
+  
   const deviceId = getDeviceId()
 
   const [fileToUpload, setFileToUpload] = useState<File | null>(null)
-
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const currentPreviewRef = useRef<string | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
-
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const [done, setDone] = useState(false)
@@ -38,9 +91,7 @@ export default function Uploader() {
   const galleryInputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
-    return () => {
-      if (currentPreviewRef.current) URL.revokeObjectURL(currentPreviewRef.current)
-    }
+    return () => { if (currentPreviewRef.current) URL.revokeObjectURL(currentPreviewRef.current) }
   }, [])
 
   const openCamera = () => cameraInputRef.current?.click()
@@ -48,10 +99,7 @@ export default function Uploader() {
 
   const resetSelection = () => {
     setFileToUpload(null)
-    if (currentPreviewRef.current) {
-      URL.revokeObjectURL(currentPreviewRef.current)
-      currentPreviewRef.current = null
-    }
+    if (currentPreviewRef.current) { URL.revokeObjectURL(currentPreviewRef.current); currentPreviewRef.current = null }
     setPreviewUrl(null)
     setPreviewLoading(false)
     setLoading(false)
@@ -61,137 +109,106 @@ export default function Uploader() {
     if (galleryInputRef.current) galleryInputRef.current.value = ''
   }
 
-  // ---------- Conversión / optimización ----------
-
   async function buildPreviewUrl(
     file: File,
-    currentPreviewRef: React.MutableRefObject<string | null>,
+    currentPreviewRef: { current: string | null },
     setPreviewUrl: (u: string | null) => void,
     setPreviewLoading: (b: boolean) => void,
     onReady?: () => void
   ) {
-    setPreviewLoading(true);
-    let bmp: ImageBitmap | null = null;
-  
-    // Intento 1: decodificar ya reducido (usa mucha menos RAM)
+    setPreviewLoading(true)
+    let bmp: ImageBitmap | null = null
+
     try {
       bmp = await (createImageBitmap as any)(file, {
         resizeWidth: MAX_PREVIEW,
         resizeHeight: MAX_PREVIEW,
         resizeQuality: 'high',
-      });
+      })
     } catch {
-      // Fallback: <img>.decode() + canvas pequeño
-      const tmpUrl = URL.createObjectURL(file);
+      const tmpUrl = URL.createObjectURL(file)
       try {
-        const img = document.createElement('img');
-        img.decoding = 'async';
-        img.src = tmpUrl;
-        await img.decode();
-  
-        const maxSide = Math.max(img.naturalWidth, img.naturalHeight);
-        const scale = Math.min(1, MAX_PREVIEW / maxSide);
-        const outW = Math.max(1, Math.round(img.naturalWidth * scale));
-        const outH = Math.max(1, Math.round(img.naturalHeight * scale));
-  
-        const canvas = document.createElement('canvas');
-        canvas.width = outW;
-        canvas.height = outH;
-        const ctx = canvas.getContext('2d', { alpha: false });
-        if (!ctx) throw new Error('No se pudo crear canvas');
-  
-        ctx.drawImage(img, 0, 0, outW, outH);
-        // Exporto a preview liviano (WebP 80%) — SOLO para mostrar
+        const img = document.createElement('img')
+        img.decoding = 'async'
+        img.src = tmpUrl
+        await img.decode()
+        const maxSide = Math.max(img.naturalWidth, img.naturalHeight)
+        const scale = Math.min(1, MAX_PREVIEW / maxSide)
+        const outW = Math.max(1, Math.round(img.naturalWidth * scale))
+        const outH = Math.max(1, Math.round(img.naturalHeight * scale))
+        const canvas = document.createElement('canvas')
+        canvas.width = outW
+        canvas.height = outH
+        const ctx = canvas.getContext('2d', { alpha: false })!
+        ctx.drawImage(img, 0, 0, outW, outH)
         const blob: Blob = await new Promise((res, rej) =>
           canvas.toBlob(b => (b ? res(b) : rej(new Error('toBlob preview falló'))), 'image/webp', 0.8)
-        );
-  
-        const newUrl = URL.createObjectURL(blob);
-        const oldUrl = currentPreviewRef.current;
-        currentPreviewRef.current = newUrl;
-        setPreviewUrl(newUrl);
-        // Revoco el viejo URL cuando la <img> nueva termina de cargar (ver onLoad en el <img>)
-        (handleRevokeOldUrl as any).pending = oldUrl;
-        setPreviewLoading(false);
-        onReady?.();
-        return;
+        )
+        const newUrl = URL.createObjectURL(blob)
+        const oldUrl = currentPreviewRef.current
+        currentPreviewRef.current = newUrl
+        setPreviewUrl(newUrl)
+        ;(handleRevokeOldUrl as any).pending = oldUrl
+        setPreviewLoading(false)
+        onReady?.()
+        return
       } finally {
-        URL.revokeObjectURL(tmpUrl);
+        URL.revokeObjectURL(tmpUrl)
       }
     }
-  
-    // Si llegamos acá, tenemos un ImageBitmap reducido (intento 1)
-    // Lo dibujo a canvas y genero un blob liviano para la preview
-    const cnv = document.createElement('canvas');
-    cnv.width = bmp!.width;
-    cnv.height = bmp!.height;
-    const ctx2 = cnv.getContext('2d', { alpha: false });
-    if (!ctx2) {
-      setPreviewLoading(false);
-      throw new Error('No se pudo crear canvas');
-    }
-    ctx2.drawImage(bmp!, 0, 0);
+
+    const cnv = document.createElement('canvas')
+    cnv.width = bmp!.width
+    cnv.height = bmp!.height
+    const ctx2 = cnv.getContext('2d', { alpha: false })!
+    ctx2.drawImage(bmp!, 0, 0)
     const blob: Blob = await new Promise((res, rej) =>
       cnv.toBlob(b => (b ? res(b) : rej(new Error('toBlob preview falló'))), 'image/webp', 0.8)
-    );
-  
-    const newUrl = URL.createObjectURL(blob);
-    const oldUrl = currentPreviewRef.current;
-    currentPreviewRef.current = newUrl;
-    setPreviewUrl(newUrl);
-    (handleRevokeOldUrl as any).pending = oldUrl;
-    setPreviewLoading(false);
-    onReady?.();
+    )
+    const newUrl = URL.createObjectURL(blob)
+    const oldUrl = currentPreviewRef.current
+    currentPreviewRef.current = newUrl
+    setPreviewUrl(newUrl)
+    ;(handleRevokeOldUrl as any).pending = oldUrl
+    setPreviewLoading(false)
+    onReady?.()
   }
-  
 
   async function handlePick(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0];
-    if (!f) return;
-  
-    setMessage(null);
-    setDone(false);
-  
-    // 1) Guardar ORIGINAL para subir (sin tocarlo)
-    setFileToUpload(f);
-  
-    // 2) Construir SOLO la preview reducida (no afecta al archivo de subida)
+    const f = e.target.files?.[0]
+    if (!f) return
+    setMessage(null); setDone(false)
+    setFileToUpload(f)
     try {
-      await buildPreviewUrl(f, currentPreviewRef, setPreviewUrl, setPreviewLoading);
-    } catch (err: any) {
-      // Si el dispositivo no puede ni siquiera generar preview, no bloqueamos el envío
-      setPreviewUrl(null);
-      setPreviewLoading(false);
-      setMessage('No se pudo generar la vista previa (memoria). Podés enviar la foto igual.');
+      await buildPreviewUrl(f, currentPreviewRef, setPreviewUrl, setPreviewLoading)
+    } catch {
+      setPreviewUrl(null)
+      setPreviewLoading(false)
+      setMessage('No se pudo generar la vista previa (memoria). Podés enviar la foto igual.')
     }
   }
-  
 
   const handleRevokeOldUrl = () => {
     setPreviewLoading(false)
     const oldUrl = (handleRevokeOldUrl as any).pending as string | null
-    if (oldUrl) {
-      try { URL.revokeObjectURL(oldUrl) } catch {}
-      ;(handleRevokeOldUrl as any).pending = null
-    }
+    if (oldUrl) { try { URL.revokeObjectURL(oldUrl) } catch {} ;(handleRevokeOldUrl as any).pending = null }
   }
 
-  // ---------- Subida (spinner + ✔ y auto-volver) ----------
   const submit = async () => {
-    if (!fileToUpload) return
-    setLoading(true)
-    setDone(false)
-    setMessage(null)
+    if (!fileToUpload || !uploaderName) return
+    setLoading(true); setDone(false); setMessage(null)
 
     const fd = new FormData()
     fd.append('event', event)
     fd.append('file', fileToUpload)
     fd.append('device_id', deviceId)
+    fd.append('uploader_name', uploaderName)
 
     try {
       const xhr = new XMLHttpRequest()
       xhr.open('POST', '/api/photos', true)
       xhr.setRequestHeader('X-Device-Id', deviceId)
+      xhr.setRequestHeader('X-Uploader-Name', uploaderName)
 
       xhr.onreadystatechange = () => {
         if (xhr.readyState === XMLHttpRequest.DONE) {
@@ -199,138 +216,274 @@ export default function Uploader() {
           if (xhr.status >= 200 && xhr.status < 300) {
             setDone(true)
             setMessage('¡Listo! Tu foto se proyectará en breve.')
-            // Volver al menú principal 2s después (si hay error, no volvemos)
-            setTimeout(() => { resetSelection() }, 2000)
-          } else {
+          
+            // 🎉 Confeti con paleta boda (rosa, blanco, azul marino)
+            fireWeddingConfetti();
+          
+            // reinicio luego de 2s
+            setTimeout(() => { resetSelection() }, 3000)
+          }else {
             let errMsg = 'Error al subir la foto'
             try {
               const j = JSON.parse(xhr.responseText)
-              if (xhr.status === 429) {
-                errMsg = j?.error || 'Rate limit: esperá unos segundos y volvé a intentar.'
-              } else if (xhr.status === 400) {
-                errMsg = j?.detail || j?.error || errMsg
-              } else {
-                errMsg = j?.error || errMsg
-              }
+              if (xhr.status === 429) errMsg = j?.error || 'Rate limit: esperá unos segundos y volvé a intentar.'
+              else if (xhr.status === 400) errMsg = j?.detail || j?.error || errMsg
+              else errMsg = j?.error || errMsg
             } catch {}
-            setMessage(errMsg)
-            setDone(false) // mantener en previsualización
+            setMessage(errMsg); setDone(false)
           }
         }
       }
 
-      xhr.onerror = () => {
-        setLoading(false); setDone(false)
-        setMessage('No se pudo conectar al servidor.')
-      }
-
+      xhr.onerror = () => { setLoading(false); setDone(false); setMessage('No se pudo conectar al servidor.') }
       xhr.send(fd)
     } catch {
-      setLoading(false); setDone(false)
-      setMessage('No se pudo conectar al servidor.')
+      setLoading(false); setDone(false); setMessage('No se pudo conectar al servidor.')
     }
   }
 
-  // ---------- Estilos ----------
-  const styles = {
-    container: { maxWidth: 520, margin: '0 auto', padding: 16, fontFamily: 'system-ui,Segoe UI,Roboto,sans-serif' } as const,
-    card: { border: '1px solid #e5e7eb', borderRadius: 16, padding: 16 } as const,
-    h1: { fontSize: 20, marginBottom: 6 } as const,
-    muted: { color: '#666', fontSize: 14 } as const,
-    row: { display: 'grid', gridTemplateColumns: '1fr', gap: 8, marginTop: 12 } as const,
-    btnPrimary: { background: '#111', color: '#fff', padding: '12px 14px', borderRadius: 12, border: 0, fontWeight: 600 } as const,
-    btnSecondary: {
-      background: '#f4f4f5', color: '#111', padding: '12px 14px', borderRadius: 12, border: '1px solid #e5e7eb', fontWeight: 600
-    } as const,
-    disabled: { opacity: 0.6, cursor: 'not-allowed' } as const,
-    previewBox: { marginTop: 12, borderRadius: 16, border: '1px solid #e5e7eb', overflow: 'hidden', background: '#fafafa', position: 'relative' } as const,
-    img: { display: 'block', width: '100%', height: 'auto', objectFit: 'contain', maxHeight: '60vh' } as const,
-    spinnerWrap: {
-      position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(255,255,255,0.6)'
-    } as const,
-    spinner: {
-      width: 40, height: 40, borderRadius: '50%',
-      border: '4px solid #e5e7eb', borderTopColor: '#111', animation: 'spin 1s linear infinite'
-    } as const,
-    uploadRow: { display: 'flex', gap: 8, marginTop: 12 } as const,
-    statusRow: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 12 } as const,
-    check: {
-      width: 36, height: 36, borderRadius: '50%', background: '#10b981', color: '#fff',
-      display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: 18
-    } as const,
-    tip: { fontSize: 13, color: '#666' } as const
-  }
-
   return (
-    <div style={styles.container}>
-      <style>{`@keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}`}</style>
+    <div className="wdg-page">
+      {/* Fuentes + estilos */}
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Great+Vibes&family=Poppins:wght@400;600;700&display=swap');
+  
+        :root{
+          --wdg-primary: #00008B;   /* rosa elegante */
+          --wdg-primary-dark: #d81b60;
+          --wdg-gold: #d4af37;      /* dorado */
+          --wdg-bg: #fff7fb;        /* blush muy suave */
+          --wdg-border: #f3e5f5;
+          --wdg-text: #433;         /* gris cálido */
+          --wdg-muted: #766;
+        }
+  
+        /* ===== Fondo pantalla completa ===== */
+        .wdg-page{
+          position: fixed;
+          inset: 0;
+          background: url('/fondo.jpg') no-repeat center center;
+          background-size: cover;   /* ocupa todo sin bandas negras */
+          overflow: hidden;         /* sin scroll */
+          font-family: 'Poppins','Segoe UI',system-ui,Roboto,sans-serif;
+          color: var(--wdg-text);
+        }
+        /* Velo para contraste (opcional, ajusta opacidad si querés) */
+        .wdg-page::before{
+          content: "";
+          position: absolute; inset: 0;
+          background: rgba(0,0,0,0.25);
+        }
+  
+        /* Contenedor que centra y da respiración en bordes */
+        .wdg-center{
+          position: relative;       /* sobre el overlay */
+          z-index: 1;
+          min-height: 100vh;
+          display: grid;
+          place-items: center;      /* centro vertical y horizontal */
+          padding: 16px;            /* evita pegar la tarjeta a los bordes en móviles */
+          box-sizing: border-box; /* que cuente el padding dentro del ancho total */
+        }
+  
+        /* ===== Tarjeta ===== */
+        .wdg-card{
+          position: relative;       /* base para corazones internos */
+          width: 90%;
+          max-width: 560px;
+          border: 1px solid var(--wdg-border);
+          border-radius: 24px;
+          padding: 24px;
+          background:
+            radial-gradient(80% 60% at 10% 0%, #ffe9f2 0%, transparent 60%),
+            radial-gradient(80% 60% at 100% 10%, #fff2e0 0%, transparent 60%),
+            linear-gradient(145deg, #fff, var(--wdg-bg));
+          box-shadow: 0 10px 28px rgba(0,0,0,0.18);
+          overflow: hidden;
+        }
+  
+        /* Corazones SOLO dentro de la tarjeta */
+        .wdg-hearts{
+          position:absolute; inset:0; pointer-events:none; opacity:.15;
+          border-radius: inherit;
+          background:
+            url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80"><text x="10" y="45" font-size="28">❤</text></svg>')
+            repeat;
+          background-size: 40px 40px;
+          animation: float 14s linear infinite;
+        }
+        @keyframes float { from{background-position:0 0} to{background-position:0 200px} }
+  
+        .wdg-title{
+          font-family: 'Great Vibes', cursive;
+          font-size: 40px;
+          line-height: 1;
+          margin: 0 0 4px;
+          color: var(--wdg-primary);
+          text-shadow: 0 2px 0 rgba(0,0,0,0.04);
+          text-align: center;
+        }
+        .wdg-sub{ font-size: 14px; color: var(--wdg-muted); margin-bottom: 14px; }
+        .wdg-event b{ color: var(--wdg-gold); }
+  
+        .wdg-row{ display:grid; grid-template-columns: 1fr; gap: 10px; margin-top: 14px; }
+  
+        .wdg-input{
+          width: 100%;
+          padding: 12px 14px;
+          border-radius: 16px;
+          border: 1px solid #eadcf1;
+          background: #fff;
+          outline: none;
+          transition: box-shadow .2s, border-color .2s;
+          font-size: 15px;
+          color: black;
+        }
+        .wdg-input:focus{
+          border-color: var(--wdg-primary);
+          box-shadow: 0 0 0 4px rgba(233,30,99,.12);
+        }
+  
+        .wdg-btn{
+          padding: 14px 16px;
+          border-radius: 16px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: transform .05s ease-out, box-shadow .2s, background .2s;
+          border: 0;
+        }
+        .wdg-btn:active{ transform: translateY(1px); }
+  
+        .wdg-btn--primary{
+          background: var(--wdg-primary);
+          color: #fff;
+        }
+        .wdg-btn--primary:hover{ background: var(--wdg-primary-dark); }
+  
+        .wdg-btn--secondary{
+          background: #f7f7f8;
+          color: #333;
+          border: 1px solid #e9e9ea;
+          z-index: 2;
+        }
+        .wdg-btn--secondary:hover{ background:#efeff0; }
+  
+        .wdg-name-row{ display:flex; gap:10px; align-items:center; margin-top: 14px; }
+        .wdg-badge{
+          background: #fff0f6;
+          border: 1px solid #f8bbd0;
+          color: #c2185b;
+          padding: 6px 12px;
+          border-radius: 999px;
+          font-size: 14px;
+          display:flex; align-items:center; gap:8px;
+        }
+  
+        .wdg-preview{
+          margin-top: 14px; border-radius: 20px; border: 1px solid #eee;
+          overflow:hidden; background:#fafafa; position:relative;
+        }
+        .wdg-img{ display:block; width:100%; height:auto; object-fit:contain; max-height:60vh; }
+        .wdg-spinner-wrap{ position:absolute; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(255,255,255,.65) }
+        .wdg-spinner{ width:40px;height:40px;border-radius:50%;border:4px solid #f1f1f1;border-top-color:var(--wdg-primary); animation:spin 1s linear infinite }
+        @keyframes spin{ from{transform:rotate(0)} to{transform:rotate(360deg)} }
+  
+        .wdg-upload-row{ display:flex; gap:10px; margin-top:14px; }
+        .wdg-status{ display:flex; align-items:center; gap:10px; margin-top:14px }
+        .wdg-check{ width:36px; height:36px; border-radius:50%; background:#4caf50; color:#fff; display:inline-flex; align-items:center; justify-content:center; font-weight:800; font-size:18px }
+  
+        .wdg-tip{
+          font-size: 13px;
+          color: white;
+          margin-top: 16px;
+          text-align: center;
+          position: relative;
+          z-index: 1; 
+        }
+  
+        .wdg-icon{ font-size: 18px }
 
-      <div style={styles.card}>
-        <h1 style={styles.h1}>Subir foto para proyectar</h1>
-        <p style={{ ...styles.muted, marginBottom: 8 }}>Evento: <b>{event}</b></p>
-
-        {!previewUrl && (
-          <>
-            <div style={styles.row as any}>
-              <button type="button" onClick={openCamera} style={styles.btnPrimary}>Tomar foto</button>
-              <button type="button" onClick={openGallery} style={styles.btnSecondary}>Elegir de galería</button>
-            </div>
-
-            <input
-              ref={cameraInputRef}
-              type="file"
-              accept="image/*"
-              capture="environment"
-              onChange={handlePick}
-              style={{ display: 'none' }}
-            />
-            <input
-              ref={galleryInputRef}
-              type="file"
-              accept="image/*"
-              onChange={handlePick}
-              style={{ display: 'none' }}
-            />
-          </>
-        )}
-
-        {previewUrl && (
-          <>
-            <div style={styles.previewBox}>
-              <img src={previewUrl} alt="Previsualización" style={styles.img} onLoad={handleRevokeOldUrl} />
-              {previewLoading && (
-                <div style={styles.spinnerWrap}><div style={styles.spinner} /></div>
-              )}
-            </div>
-
-            <div style={styles.uploadRow}>
-              <button
-                onClick={submit}
-                disabled={loading || !fileToUpload}
-                style={{ ...styles.btnPrimary, ...(loading || !fileToUpload ? styles.disabled : {}) }}
-              >
-                {loading ? 'Enviando…' : 'Enviar'}
+        @keyframes pop {
+          0% { transform: scale(0); opacity: 0; }
+          70% { transform: scale(1.3); opacity: 1; }
+          100% { transform: scale(1); }
+        }
+        .wdg-check {
+          animation: pop 0.5s ease-out;
+        }
+      `}</style>
+  
+      <div className="wdg-center">
+        <div className="wdg-card">
+          <div className="wdg-hearts" aria-hidden="true" />
+          <h1 className="wdg-title">¡Comparte tu momento!</h1>
+          {/* Oculto el nombre del evento en la vista
+          <p className="wdg-sub wdg-event">Evento: <b>{event}</b></p>
+          */}
+  
+          {/* Gate de nombre */}
+          {editingName ? (
+            <div className="wdg-name-row">
+              <input
+                className="wdg-input"
+                placeholder="Ingresa tu nombre"
+                value={uploaderName}
+                onChange={e => setUploaderName(e.target.value)}
+                onKeyDown={e => (e.key === 'Enter' ? saveName() : null)}
+              />
+              <button type="button" onClick={saveName} className="wdg-btn wdg-btn--primary">
+                Confirmar
               </button>
-              <button
-                onClick={resetSelection}
-                disabled={loading}
-                style={{ ...styles.btnSecondary, ...(loading ? styles.disabled : {}) }}
-              >
-                Reemplazar foto
-              </button>
             </div>
+          ) : (
+            <div className="wdg-name-row">
+              <span className="wdg-badge"><span className="wdg-icon">❤</span> Subiendo como: <b>{uploaderName}</b></span>
+              <button type="button" onClick={()=>setEditingName(true)} className="wdg-btn wdg-btn--secondary">Cambiar</button>
+            </div>
+          )}
+  
+          {/* Acciones (bloqueadas si no hay nombre confirmado) */}
+          {!editingName && !previewUrl && (
+            <>
+              <div className="wdg-row">
+                <button type="button" onClick={openCamera} className="wdg-btn wdg-btn--primary">📷 Tomar foto</button>
+                <button type="button" onClick={openGallery} className="wdg-btn wdg-btn--secondary">🖼️ Elegir de galería</button>
+              </div>
+  
+              <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" onChange={handlePick} style={{ display: 'none' }} />
+              <input ref={galleryInputRef} type="file" accept="image/*" onChange={handlePick} style={{ display: 'none' }} />
+            </>
+          )}
+  
+          {previewUrl && (
+            <>
+              <div className="wdg-preview">
+                <img src={previewUrl} alt="Previsualización" className="wdg-img" onLoad={handleRevokeOldUrl} />
+                {previewLoading && (<div className="wdg-spinner-wrap"><div className="wdg-spinner" /></div>)}
+              </div>
+  
+              <div className="wdg-upload-row">
+                <button onClick={submit} disabled={loading || !fileToUpload || !uploaderName} className="wdg-btn wdg-btn--primary">
+                  {loading ? 'Enviando…' : 'Enviar'}
+                </button>
+                <button onClick={resetSelection} disabled={loading} className="wdg-btn wdg-btn--secondary">
+                  Reemplazar foto
+                </button>
+              </div>
+  
+              <div className="wdg-status">
+                {loading && <div className="wdg-spinner" aria-label="Subiendo..." />}
+                {done && !loading && <div className="wdg-check">✔</div>}
+                {message && <div style={{ color: message.startsWith('¡Listo!') ? '#065f46' : 'crimson' }}>{message}</div>}
+              </div>
+            </>
+          )}
+        </div>
 
-            <div style={styles.statusRow}>
-              {loading && <div style={styles.spinner} aria-label="Subiendo..." />}
-              {done && !loading && <div style={styles.check}>✔</div>}
-              {message && <div style={{ color: message.startsWith('¡Listo!') ? '#065f46' : 'crimson' }}>{message}</div>}
-            </div>
-          </>
-        )}
+        <p className="wdg-tip">Tip: 1 de agua cada 1 de alcohol.</p>
+
       </div>
-
-      <hr style={{ margin: '16px 0' }} />
-      <p style={styles.tip}>Tip: generá un QR con <code>http://localhost:5173/uploader?event={event}</code></p>
     </div>
   )
+  
 }
