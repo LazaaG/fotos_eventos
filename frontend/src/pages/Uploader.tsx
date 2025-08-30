@@ -6,6 +6,14 @@ export default function Uploader() {
   const params = new URLSearchParams(location.search)
   const event = params.get('event') || 'default'
 
+  // Bloqueo de "back" mientras el usuario está en el flujo de preview/subida
+  const blockBackRef = useRef(false);
+
+  // === Ajustes específicos para Android (sin tocar estilos ni UI) ===
+  const UA = navigator.userAgent.toLowerCase();
+  const IS_ANDROID = UA.includes('android');
+  const ANDROID_PREVIEW_MAX = 1280; // target conservador para evitar OOM en selfies
+
   // ---------- nombre de usuario ----------
   const NAME_KEY = 'uploader_name'
   const [uploaderName, setUploaderName] = useState<string>(() => localStorage.getItem(NAME_KEY) || '')
@@ -40,7 +48,7 @@ export default function Uploader() {
   }
 
   function fireWeddingConfetti() {
-    const colors = ['#ffffff', '#0b1a39']; // rosa, blanco, azul marino
+    const colors = ['#ffffff', '#0b1a39']; // blanco y azul marino
   
     // ráfaga izquierda → derecha
     confetti({
@@ -91,6 +99,27 @@ export default function Uploader() {
   const galleryInputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
+    const onPop = (_ev: PopStateEvent) => {
+      // Si debemos bloquear, reinsertamos el estado para anular el "back"
+      if (blockBackRef.current) {
+        history.pushState(null, '', location.href);
+      }
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []); 
+
+  useEffect(() => {
+    const shouldBlock = !!previewUrl || loading;
+    blockBackRef.current = shouldBlock;
+    // Al habilitar el bloqueo, metemos un estado dummy en el historial
+    if (shouldBlock) {
+      history.pushState(null, '', location.href);
+    }
+  }, [previewUrl, loading]);
+  
+
+  useEffect(() => {
     return () => { if (currentPreviewRef.current) URL.revokeObjectURL(currentPreviewRef.current) }
   }, [])
 
@@ -117,12 +146,13 @@ export default function Uploader() {
     onReady?: () => void
   ) {
     setPreviewLoading(true)
+    const target = IS_ANDROID ? ANDROID_PREVIEW_MAX : MAX_PREVIEW
     let bmp: ImageBitmap | null = null
 
     try {
+      // ⚠️ Solo 'resizeWidth' para mantener aspecto y evitar decodificación gigante
       bmp = await (createImageBitmap as any)(file, {
-        resizeWidth: MAX_PREVIEW,
-        resizeHeight: MAX_PREVIEW,
+        resizeWidth: target,
         resizeQuality: 'high',
       })
     } catch {
@@ -133,7 +163,7 @@ export default function Uploader() {
         img.src = tmpUrl
         await img.decode()
         const maxSide = Math.max(img.naturalWidth, img.naturalHeight)
-        const scale = Math.min(1, MAX_PREVIEW / maxSide)
+        const scale = Math.min(1, target / maxSide)
         const outW = Math.max(1, Math.round(img.naturalWidth * scale))
         const outH = Math.max(1, Math.round(img.naturalHeight * scale))
         const canvas = document.createElement('canvas')
@@ -142,7 +172,7 @@ export default function Uploader() {
         const ctx = canvas.getContext('2d', { alpha: false })!
         ctx.drawImage(img, 0, 0, outW, outH)
         const blob: Blob = await new Promise((res, rej) =>
-          canvas.toBlob(b => (b ? res(b) : rej(new Error('toBlob preview falló'))), 'image/webp', 0.8)
+          canvas.toBlob(b => (b ? res(b) : rej(new Error('toBlob preview falló'))), 'image/webp', IS_ANDROID ? 0.75 : 0.8)
         )
         const newUrl = URL.createObjectURL(blob)
         const oldUrl = currentPreviewRef.current
@@ -162,8 +192,10 @@ export default function Uploader() {
     cnv.height = bmp!.height
     const ctx2 = cnv.getContext('2d', { alpha: false })!
     ctx2.drawImage(bmp!, 0, 0)
+    try { (bmp as any).close?.() } catch {}
+
     const blob: Blob = await new Promise((res, rej) =>
-      cnv.toBlob(b => (b ? res(b) : rej(new Error('toBlob preview falló'))), 'image/webp', 0.8)
+      cnv.toBlob(b => (b ? res(b) : rej(new Error('toBlob preview falló'))), 'image/webp', IS_ANDROID ? 0.75 : 0.8)
     )
     const newUrl = URL.createObjectURL(blob)
     const oldUrl = currentPreviewRef.current
@@ -216,13 +248,11 @@ export default function Uploader() {
           if (xhr.status >= 200 && xhr.status < 300) {
             setDone(true)
             setMessage('¡Listo! Tu foto se proyectará en breve.')
-          
-            // 🎉 Confeti con paleta boda (rosa, blanco, azul marino)
+            // 🎉 Confeti con paleta boda
             fireWeddingConfetti();
-          
-            // reinicio luego de 2s
+            // reinicio luego de 3s
             setTimeout(() => { resetSelection() }, 3000)
-          }else {
+          } else {
             let errMsg = 'Error al subir la foto'
             try {
               const j = JSON.parse(xhr.responseText)
@@ -385,7 +415,7 @@ export default function Uploader() {
         }
         .wdg-img{ display:block; width:100%; height:auto; object-fit:contain; max-height:60vh; }
         .wdg-spinner-wrap{ position:absolute; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(255,255,255,.65) }
-        .wdg-spinner{ width:40px;height:40px;border-radius:50%;border:4px solid #f1f1f1;border-top-color:var(--wdg-primary); animation:spin 1s linear infinite }
+        .wdg-spinner{ width:40px;height:40px;border-radius:50%;border:4px solid #f1f1f1;border-top-color: var(--wdg-primary); animation:spin 1s linear infinite }
         @keyframes spin{ from{transform:rotate(0)} to{transform:rotate(360deg)} }
   
         .wdg-upload-row{ display:flex; gap:10px; margin-top:14px; }

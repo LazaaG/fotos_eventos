@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+import shutil
 
 from .db import init_db, connect
 from .models import ScreenStateResponse, DefaultItem, DefaultsResponse
@@ -114,6 +115,50 @@ def rate_allow_with_fallback(event: str, device_id: str, window: int):
             return (False, window - delta)
         LAST_UPLOAD_TS[key] = now
         return (True, 0)
+    
+# --- Guardar UploadFile a disco en streaming y controlar tamaño ---
+async def save_upload_streaming_strict(upload: UploadFile, dst_path: Path, *, max_mb: int) -> int:
+    """
+    Escribe el archivo a disco por chunks sin cargarlo completo en RAM.
+    Controla MAX_IMAGE_MB. Devuelve bytes escritos.
+    """
+    tmp_path = dst_path.with_suffix(dst_path.suffix + ".part")
+    total = 0
+    limit = max_mb * 1024 * 1024
+    try:
+        with tmp_path.open("wb") as out:
+            while True:
+                chunk = await upload.read(1024 * 1024)  # 1 MB
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > limit:
+                    raise HTTPException(status_code=400, detail="Archivo demasiado grande")
+                out.write(chunk)
+        tmp_path.rename(dst_path)
+        return total
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except:
+            pass
+        raise
+    finally:
+        # Cerramos el stream del UploadFile
+        try:
+            await upload.close()
+        except:
+            pass
+
+# Adivinar extensión desde Mime (si guess_extension falla)
+def guess_ext_from_mime(mime: str) -> str:
+    if mime == "image/jpeg":
+        return ".jpg"
+    if mime == "image/png":
+        return ".png"
+    if mime == "image/webp":
+        return ".webp"
+    return mimetypes.guess_extension(mime) or ".jpg"
 
 # ---------- Startup ----------
 from contextlib import asynccontextmanager
@@ -256,39 +301,50 @@ def _get_folder_id() -> str:
     return raw.strip().strip('"').strip("'")
 
 
-async def _backup_to_drive_async(photo_id: str, content: bytes, filename: str, mime_type: str, event_id: str):
+async def _backup_to_drive_from_path_async(
+    photo_id: str,
+    path: Path,
+    filename: str,
+    mime_type: str,
+    event_id: str,
+):
     if not GOOGLE_DRIVE_BACKUP_ENABLED:
         log_drive_backup(photo_id, "failed", "Backup disabled by env", event_id=event_id, filename=filename)
         return
+
     folder_id = _get_folder_id()
     if not folder_id:
         log_drive_backup(photo_id, "failed", "Missing GOOGLE_DRIVE_FOLDER_ID", event_id=event_id, filename=filename)
-        print("[drive] FOLDER_ID vacío dentro del worker")
         return
-    print("[drive] usando FOLDER_ID:", folder_id)  # debug temporal
 
     try:
         drive = get_drive_client()
-        uploaded = drive.upload_bytes(
-            content=content,
-            filename=filename,
-            mime_type=mime_type or "application/octet-stream",
-            folder_id=folder_id,
-            make_public=GOOGLE_DRIVE_MAKE_PUBLIC
-        )
-        file_id = uploaded.get("id")
-        if not file_id:
-            log_drive_backup(photo_id, "failed", "No file_id returned", event_id=event_id, filename=filename)
-            return
-        conn = connect()
-        try:
-            conn.execute("UPDATE photos SET gdrive_file_id=? WHERE id=?", (file_id, photo_id))
-            conn.commit()
-        finally:
-            conn.close()
-        log_drive_backup(photo_id, "ok", "Uploaded to Drive", drive_file_id=file_id, event_id=event_id, filename=filename)
+
+        # Si tu cliente tiene soporte nativo de path, úsalo
+        if hasattr(drive, "upload_path"):
+            uploaded = drive.upload_path(
+                path=str(path),
+                filename=filename,
+                mime_type=mime_type or "application/octet-stream",
+                folder_id=folder_id,
+                make_public=GOOGLE_DRIVE_MAKE_PUBLIC,
+                chunksize_mb=10,  # resumable
+            )
+        else:
+            # Fallback de compatibilidad (carga a memoria, sólo si tu wrapper no soporta path)
+            with path.open("rb") as f:
+                content = f.read()
+            uploaded = drive.upload_bytes(
+                content=content,
+                filename=filename,
+                mime_type=mime_type or "application/octet-stream",
+                folder_id=folder_id,
+                make_public=GOOGLE_DRIVE_MAKE_PUBLIC,
+            )
+
+        log_drive_backup(photo_id, "ok", f"Drive id={uploaded.get('id')}", event_id=event_id, filename=filename)
     except Exception as e:
-        log_drive_backup(photo_id, "failed", f"Drive upload failed: {e}", event_id=event_id, filename=filename)
+        log_drive_backup(photo_id, "failed", f"{type(e).__name__}: {e}", event_id=event_id, filename=filename)
 
 # ---------- Upload ----------
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Request, HTTPException, Header
@@ -310,12 +366,9 @@ async def post_photo(
     if not allowed:
         return JSONResponse(status_code=429, content={"error": f"Rate limit: esperá {remain}s entre subidas","remaining": remain})
 
-    # ---- validar tipo y tamaño ----
+    # ---- validar MIME ----
     if file.content_type not in ALLOWED_MIME:
-        raise HTTPException(400, detail="Tipo no permitido")
-    content = await file.read()
-    if len(content) > MAX_IMAGE_MB * 1024 * 1024:
-        raise HTTPException(400, detail="Archivo demasiado grande")
+        raise HTTPException(status_code=400, detail="Tipo no permitido")
 
     # ---- nombre de usuario ----
     uploader = (x_uploader_name or uploader_name_form or "").strip()
@@ -323,9 +376,9 @@ async def post_photo(
         raise HTTPException(400, detail="uploader_name inválido")
 
     # ---- extensión y filename final (Usuario01.jpg) ----
-    ext = mimetypes.guess_extension(file.content_type) or ".jpg"
+    ext = guess_ext_from_mime(file.content_type)
 
-    # Calcular secuencia atomicamente por (event, uploader)
+    # Calcular secuencia atomica por (event, uploader)
     conn = connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -335,26 +388,50 @@ async def post_photo(
         ).fetchone()
         next_seq = int(row["mx"] or 0) + 1
         base_name = f"{uploader}{next_seq:02d}{ext}"
+        conn.commit()
+    finally:
+        conn.close()
 
-        # Guardar local con ese nombre exacto
-        _, public_url = upload_to_local(content, base_name, LOCAL_UPLOAD_DIR, BASE_PUBLIC_URL, keep_name=True)
+    # --- Guardar a disco en streaming, controlando MAX_IMAGE_MB ---
+    dst_path = LOCAL_UPLOAD_DIR / base_name
+    written = await save_upload_streaming_strict(file, dst_path, max_mb=MAX_IMAGE_MB)
 
-        # Insertar en DB
-        now_iso = datetime.now(timezone.utc).isoformat()
-        photo_id = uuid.uuid4().hex
+    # Validación extra mínima por cabecera real
+    try:
+        import imghdr
+        kind = imghdr.what(dst_path)
+        if kind not in {"jpeg", "png", "webp"}:
+            dst_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail="Archivo no es una imagen válida")
+    except Exception:
+        # Si imghdr falla por algún motivo, borra y propaga
+        try:
+            dst_path.unlink(missing_ok=True)
+        except:
+            pass
+        raise
+
+    public_url = f"{BASE_PUBLIC_URL}/{base_name}"
+
+    # Insertar en DB (status queued) y lanzar backup
+    now_iso = datetime.now(timezone.utc).isoformat()
+    photo_id = uuid.uuid4().hex
+
+    conn = connect()
+    try:
         conn.execute(
             """INSERT INTO photos(id,event_id,gdrive_file_id,public_url,status,created_at,uploader_name,uploader_seq,filename)
-               VALUES(?,?,?,?,?,?,?,?,?)""",
+            VALUES(?,?,?,?,?,?,?,?,?)""",
             (photo_id, event, None, public_url, "queued", now_iso, uploader, next_seq, base_name)
         )
         conn.commit()
     finally:
         conn.close()
 
-    # Backup a Drive con el MISMO filename
-    asyncio.create_task(_backup_to_drive_async(
+    # Backup a Drive con el MISMO filename (desde PATH, sin RAM)
+    asyncio.create_task(_backup_to_drive_from_path_async(
         photo_id=photo_id,
-        content=content,
+        path=dst_path,
         filename=base_name,
         mime_type=file.content_type or "application/octet-stream",
         event_id=event
