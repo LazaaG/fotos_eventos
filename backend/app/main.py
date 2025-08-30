@@ -396,21 +396,6 @@ async def post_photo(
     dst_path = LOCAL_UPLOAD_DIR / base_name
     written = await save_upload_streaming_strict(file, dst_path, max_mb=MAX_IMAGE_MB)
 
-    # Validación extra mínima por cabecera real
-    try:
-        import imghdr
-        kind = imghdr.what(dst_path)
-        if kind not in {"jpeg", "png", "webp"}:
-            dst_path.unlink(missing_ok=True)
-            raise HTTPException(status_code=400, detail="Archivo no es una imagen válida")
-    except Exception:
-        # Si imghdr falla por algún motivo, borra y propaga
-        try:
-            dst_path.unlink(missing_ok=True)
-        except:
-            pass
-        raise
-
     public_url = f"{BASE_PUBLIC_URL}/{base_name}"
 
     # Insertar en DB (status queued) y lanzar backup
